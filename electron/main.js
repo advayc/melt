@@ -14,33 +14,65 @@ let isIdle = false;
 let lastActiveTime = Date.now();
 let systemUsageData = {};
 
-// Enhanced macOS Screen Time Integration
-async function getScreenTimeData() {
-  return new Promise((resolve, reject) => {
-    // Try to get data from Screen Time database (requires permissions)
-    exec(`
-      sqlite3 ~/Library/Application\\ Support/Knowledge/knowledgeC.db "
-      SELECT 
-        ZOBJECT.ZVALUEDOUBLE as usage_time,
-        ZOBJECT.ZCREATIONDATE as timestamp,
-        ZOBJECT.ZSTREAMNAME as app_name
-      FROM ZOBJECT 
-      WHERE ZSTREAMNAME LIKE '%usage%' 
-      AND ZCREATIONDATE > (SELECT julianday('now') - 1)
-      ORDER BY ZCREATIONDATE DESC 
-      LIMIT 100;"
-    `, (error, stdout, stderr) => {
-      if (error) {
-        console.log('Screen Time database access failed, using fallback polling');
-        resolve([]);
-      } else {
-        const lines = stdout.trim().split('\n').filter(line => line);
-        const data = lines.map(line => {
-          const [usage_time, timestamp, app_name] = line.split('|');
-          return { usage_time: parseFloat(usage_time), timestamp, app_name };
-        });
-        resolve(data);
+// ---- Screen Time (knowledgeC.db) integration ----
+// We cache results to avoid hammering the SQLite DB each second.
+let lastScreenTimeFetch = 0;
+let cachedScreenTimeData = [];
+const SCREEN_TIME_FETCH_INTERVAL_MS = 5 * 60 * 1000; // 5 min
+
+async function getScreenTimeData(force = false) {
+  const now = Date.now();
+  if (!force && (now - lastScreenTimeFetch) < SCREEN_TIME_FETCH_INTERVAL_MS && cachedScreenTimeData.length) {
+    return cachedScreenTimeData;
+  }
+  return new Promise((resolve) => {
+    // Apple timestamps are seconds since 2001-01-01 (Mac absolute time). Need to add 978307200 to get Unix epoch.
+    // Query last 24h usage sessions and aggregate per bundle id.
+    const sql = `
+      SELECT
+        ZOBJECT.ZVALUESTRING AS bundle_id,
+        (ZOBJECT.ZENDDATE - ZOBJECT.ZSTARTDATE) AS usage_seconds,
+        (ZOBJECT.ZSTARTDATE + 978307200) AS start_unix,
+        (ZOBJECT.ZENDDATE + 978307200) AS end_unix
+      FROM ZOBJECT
+      WHERE ZOBJECT.ZSTREAMNAME = '/app/usage'
+        AND ZOBJECT.ZSTARTDATE > (strftime('%s','now') - 86400 - 978307200)
+        AND ZOBJECT.ZENDDATE > 0
+        AND ZOBJECT.ZENDDATE >= ZOBJECT.ZSTARTDATE
+    `;
+    exec(`sqlite3 ~/Library/Application\\ Support/Knowledge/knowledgeC.db "${sql}"`, (error, stdout, stderr) => {
+      if (error || !stdout) {
+        if (stderr && /Permission denied/i.test(stderr)) {
+          console.log('Screen Time DB permission denied. Grant Full Disk Access to this app.');
+        }
+        resolve([]); // fallback only
+        return;
       }
+      const lines = stdout.trim().split('\n').filter(Boolean);
+      const raw = lines.map(l => {
+        const parts = l.split('|');
+        const [bundle_id, usage_seconds, start_unix, end_unix] = parts;
+        return {
+          bundle_id,
+            usage_seconds: parseFloat(usage_seconds) || 0,
+            start: parseFloat(start_unix) * 1000,
+            end: parseFloat(end_unix) * 1000
+        };
+      }).filter(r => r.bundle_id && r.usage_seconds > 0);
+
+      // Aggregate per bundle
+      const aggregate = {};
+      for (const r of raw) {
+        if (!aggregate[r.bundle_id]) {
+          aggregate[r.bundle_id] = { bundle_id: r.bundle_id, totalMs: 0, sessions: [] };
+        }
+        const ms = r.usage_seconds * 1000;
+        aggregate[r.bundle_id].totalMs += ms;
+        aggregate[r.bundle_id].sessions.push({ start: r.start, end: r.end, duration: ms });
+      }
+      cachedScreenTimeData = Object.values(aggregate);
+      lastScreenTimeFetch = now;
+      resolve(cachedScreenTimeData);
     });
   });
 }
@@ -97,15 +129,13 @@ async function pollActiveApp() {
     
     if (isIdle) return; // Don't track while idle
     
-    // Try to get enhanced screen time data first
+    // Periodically fold in Screen Time baseline so we have usage even if app was closed earlier
     try {
       const screenTimeData = await getScreenTimeData();
-      if (screenTimeData.length > 0) {
-        await processScreenTimeData(screenTimeData);
+      if (screenTimeData.length) {
+        mergeScreenTimeBaseline(screenTimeData);
       }
-    } catch (e) {
-      console.log('Using fallback active window polling');
-    }
+    } catch {}
     
     // Fallback to active window polling
     const info = await getActiveWindow();
@@ -178,28 +208,39 @@ async function pollActiveApp() {
   }
 }
 
-async function processScreenTimeData(screenTimeData) {
-  // Process raw Screen Time data and merge with our tracking
-  for (const entry of screenTimeData) {
-    if (entry.app_name && entry.usage_time > 0) {
-      const id = entry.app_name;
-      if (!usage[id]) {
-        usage[id] = {
-          name: entry.app_name,
-          bundleId: id,
-          iconDataURL: null,
-          appPath: '',
-          totalMs: entry.usage_time * 1000, // Convert to ms
-          lastStart: null,
-          sessions: [],
-          windowTitle: ''
-        };
-      } else {
-        // Merge with existing data
-        usage[id].totalMs = Math.max(usage[id].totalMs, entry.usage_time * 1000);
+function mergeScreenTimeBaseline(baseline) {
+  for (const entry of baseline) {
+    const id = entry.bundle_id;
+    if (!id) continue;
+    if (!usage[id]) {
+      usage[id] = {
+        name: id.split('.').slice(-1)[0] || id,
+        bundleId: id,
+        iconDataURL: null,
+        appPath: '',
+        totalMs: entry.totalMs,
+        lastStart: null,
+        sessions: entry.sessions,
+        windowTitle: ''
+      };
+    } else {
+      // Avoid double counting: ensure we only increase if baseline larger
+      if (entry.totalMs > usage[id].totalMs) {
+        usage[id].totalMs = entry.totalMs;
+        // Optionally merge sessions (simple replacement to avoid duplicates)
+        usage[id].sessions = mergeSessions(usage[id].sessions, entry.sessions);
       }
     }
   }
+}
+
+function mergeSessions(existing, incoming) {
+  // Simple merge dedup by start+end
+  const key = s => `${s.start}-${s.end}`;
+  const map = new Map();
+  for (const s of existing) map.set(key(s), s);
+  for (const s of incoming) if (!map.has(key(s))) map.set(key(s), s);
+  return Array.from(map.values()).sort((a,b)=>a.start-b.start);
 }
 
 function pauseAllActiveSessions() {
@@ -299,6 +340,9 @@ ipcMain.handle('theme:get', () => {
   return nativeTheme.shouldUseDarkColors ? 'dark' : 'light';
 });
 
+// Tray / background operation so tracking continues when window closed
+let tray;
+
 app.whenReady().then(async () => {
   // Check for accessibility permissions on macOS
   if (process.platform === 'darwin') {
@@ -344,9 +388,28 @@ app.whenReady().then(async () => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+
+  // Create tray icon (macOS keeps app alive without visible window)
+  try {
+    const iconPath = path.join(__dirname, 'trayTemplate.png');
+    if (fs.existsSync(iconPath)) {
+      const { Tray, Menu } = require('electron');
+      tray = new Tray(iconPath);
+      const contextMenu = Menu.buildFromTemplate([
+        { label: 'Show Screen Time', click: () => { if (!mainWindow) createWindow(); else mainWindow.show(); } },
+        { label: 'Fetch Screen Time Now', click: async () => { await getScreenTimeData(true).then(d=>mergeScreenTimeBaseline(d)); if (mainWindow) mainWindow.webContents.send('usage:update', serializeUsage()); } },
+        { type: 'separator' },
+        { label: 'Quit', click: () => app.quit() }
+      ]);
+      tray.setToolTip('Screen Time Tracker');
+      tray.setContextMenu(contextMenu);
+      tray.on('click', () => { if (mainWindow) { mainWindow.show(); } else createWindow(); });
+    }
+  } catch {}
 });
 
 app.on('window-all-closed', () => {
+  // On macOS keep running (background). On other platforms quit.
   if (process.platform !== 'darwin') app.quit();
 });
 
