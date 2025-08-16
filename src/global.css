@@ -1,24 +1,54 @@
 @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;600;700&display=swap');
 
 :root {
-  --bg:#000000;
-  --bg-alt:#000000;
-  --border:#000000;
-  --text:#e6edf3;
-  --muted:#8b949e;
-  --accent:#3b82f6;
-  --accent-glow:rgba(59,130,246,0.4);
-  --radius:10px;
+  --bg: #0d1117;
+  --bg-alt: #161b22;
+  --border: #30363d;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --accent: #3b82f6;
+  --accent-glow: rgba(59,130,246,0.4);
+  --radius: 10px;
     font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
 }
 
-html, body, #root { height:100%; margin:0; background:var(--bg); color:var(--text); -webkit-font-smoothing: antialiased; }
+[data-theme="light"] {
+  --bg: #ffffff;
+  --bg-alt: #f6f8fa;
+  --border: #d0d7de;
+  --text: #24292f;
+  --muted: #656d76;
+  --accent: #0969da;
+  --accent-glow: rgba(9,105,218,0.4);
+}
 
-button { background:var(--accent); border:none; color:white; padding:8px 14px; border-radius:6px; font-weight:500; cursor:pointer; font-family:inherit; }
+html, body, #root { 
+  height: 100%; 
+  margin: 0; 
+  background: var(--bg); 
+  color: var(--text); 
+  -webkit-font-smoothing: antialiased; 
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+button { background:var(--accent); border:none; color:white; padding:8px 14px; border-radius:6px; font-weight:500; cursor:pointer; font-family:inherit; transition: all 0.2s ease; }
 button:hover { box-shadow:0 0 0 3px var(--accent-glow); }
 button:active { transform:translateY(1px); }
 .btn-secondary { background:var(--border); color:var(--text); }
 .btn-secondary:hover { background:var(--muted); }
+
+.theme-toggle { 
+  background: var(--bg-alt) !important; 
+  border: 1px solid var(--border) !important; 
+  color: var(--text) !important; 
+  font-size: 16px; 
+  padding: 8px 12px; 
+  min-width: 44px;
+}
+.theme-toggle:hover { 
+  background: var(--border) !important; 
+  box-shadow: 0 0 0 2px var(--accent-glow) !important; 
+}
 
 .stats-bar { display:flex; gap:20px; padding:16px 20px; background:var(--bg-alt); border-bottom:1px solid var(--border); }
 .stat { display:flex; flex-direction:column; gap:4px; }

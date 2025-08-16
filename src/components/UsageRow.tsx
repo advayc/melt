@@ -1,8 +1,13 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import Duration from './Duration';
+import { AppUsage } from '../types';
 
-export default function UsageRow({ app }) {
-  const [open, setOpen] = useState(false);
+interface UsageRowProps {
+  app: AppUsage;
+}
+
+export default function UsageRow({ app }: UsageRowProps): JSX.Element {
+  const [open, setOpen] = useState<boolean>(false);
   
   return (
     <>
@@ -32,12 +37,14 @@ export default function UsageRow({ app }) {
           <td colSpan={4}>
             <div className="sessions">
               <h4>Recent Sessions</h4>
-              {app.sessions.slice(-10).reverse().map((s,i)=>(
-                <div key={i} className="session-chip">
-                  <Duration ms={s.duration} />
-                  {s.endReason && <span className="end-reason">({s.endReason})</span>}
-                </div>
-              ))}
+              <div>
+                {app.sessions.slice(-10).reverse().map((s,i)=>(
+                  <div key={i} className="session-chip">
+                    <Duration ms={s.duration} />
+                    {s.endReason && <span className="end-reason">({s.endReason})</span>}
+                  </div>
+                ))}
+              </div>
               {app.sessions.length === 0 && <p className="muted">No completed sessions yet</p>}
             </div>
           </td>

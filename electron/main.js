@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, nativeImage, powerMonitor, systemPreferences } = require('electron');
+const { app, BrowserWindow, ipcMain, nativeImage, powerMonitor, systemPreferences, nativeTheme } = require('electron');
 const path = require('path');
 const { exec } = require('child_process');
 // electron-is-dev was ESM only; use built-in isPackaged flag instead
@@ -14,6 +14,37 @@ let isIdle = false;
 let lastActiveTime = Date.now();
 let systemUsageData = {};
 
+// Enhanced macOS Screen Time Integration
+async function getScreenTimeData() {
+  return new Promise((resolve, reject) => {
+    // Try to get data from Screen Time database (requires permissions)
+    exec(`
+      sqlite3 ~/Library/Application\\ Support/Knowledge/knowledgeC.db "
+      SELECT 
+        ZOBJECT.ZVALUEDOUBLE as usage_time,
+        ZOBJECT.ZCREATIONDATE as timestamp,
+        ZOBJECT.ZSTREAMNAME as app_name
+      FROM ZOBJECT 
+      WHERE ZSTREAMNAME LIKE '%usage%' 
+      AND ZCREATIONDATE > (SELECT julianday('now') - 1)
+      ORDER BY ZCREATIONDATE DESC 
+      LIMIT 100;"
+    `, (error, stdout, stderr) => {
+      if (error) {
+        console.log('Screen Time database access failed, using fallback polling');
+        resolve([]);
+      } else {
+        const lines = stdout.trim().split('\n').filter(line => line);
+        const data = lines.map(line => {
+          const [usage_time, timestamp, app_name] = line.split('|');
+          return { usage_time: parseFloat(usage_time), timestamp, app_name };
+        });
+        resolve(data);
+      }
+    });
+  });
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1100,
@@ -21,7 +52,8 @@ function createWindow() {
     minWidth: 900,
     minHeight: 600,
     title: 'Screen Time Tracker',
-    backgroundColor: '#000000ff',
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#0d1117' : '#ffffff',
+    titleBarStyle: 'hiddenInset',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
@@ -29,7 +61,15 @@ function createWindow() {
     }
   });
 
-  const url = isDev ? 'http://localhost:5173' : path.join(__dirname, '../dist/index.html');
+  // Apply theme based on system preference
+  mainWindow.webContents.on('did-finish-load', () => {
+    const theme = nativeTheme.shouldUseDarkColors ? 'dark' : 'light';
+    mainWindow.webContents.executeJavaScript(`
+      document.documentElement.setAttribute('data-theme', '${theme}');
+    `);
+  });
+
+  const url = isDev ? 'http://localhost:5174' : path.join(__dirname, '../dist/index.html');
   if (isDev) {
     mainWindow.loadURL(url);
   } else {
@@ -57,6 +97,17 @@ async function pollActiveApp() {
     
     if (isIdle) return; // Don't track while idle
     
+    // Try to get enhanced screen time data first
+    try {
+      const screenTimeData = await getScreenTimeData();
+      if (screenTimeData.length > 0) {
+        await processScreenTimeData(screenTimeData);
+      }
+    } catch (e) {
+      console.log('Using fallback active window polling');
+    }
+    
+    // Fallback to active window polling
     const info = await getActiveWindow();
     const now = Date.now();
     if (!info) return;
@@ -124,6 +175,30 @@ async function pollActiveApp() {
     }
   } catch (e) {
     console.error('Polling error:', e);
+  }
+}
+
+async function processScreenTimeData(screenTimeData) {
+  // Process raw Screen Time data and merge with our tracking
+  for (const entry of screenTimeData) {
+    if (entry.app_name && entry.usage_time > 0) {
+      const id = entry.app_name;
+      if (!usage[id]) {
+        usage[id] = {
+          name: entry.app_name,
+          bundleId: id,
+          iconDataURL: null,
+          appPath: '',
+          totalMs: entry.usage_time * 1000, // Convert to ms
+          lastStart: null,
+          sessions: [],
+          windowTitle: ''
+        };
+      } else {
+        // Merge with existing data
+        usage[id].totalMs = Math.max(usage[id].totalMs, entry.usage_time * 1000);
+      }
+    }
   }
 }
 
@@ -209,6 +284,21 @@ ipcMain.handle('usage:clearData', () => {
   return true;
 });
 
+ipcMain.handle('theme:toggle', () => {
+  const newTheme = nativeTheme.shouldUseDarkColors ? 'light' : 'dark';
+  nativeTheme.themeSource = newTheme;
+  if (mainWindow) {
+    mainWindow.webContents.executeJavaScript(`
+      document.documentElement.setAttribute('data-theme', '${newTheme}');
+    `);
+  }
+  return newTheme;
+});
+
+ipcMain.handle('theme:get', () => {
+  return nativeTheme.shouldUseDarkColors ? 'dark' : 'light';
+});
+
 app.whenReady().then(async () => {
   // Check for accessibility permissions on macOS
   if (process.platform === 'darwin') {
@@ -218,6 +308,9 @@ app.whenReady().then(async () => {
       // Prompt for permission
       systemPreferences.isTrustedAccessibilityClient(true);
     }
+    
+    // Request Full Disk Access for Screen Time data
+    console.log('For enhanced tracking, grant Full Disk Access to this app in System Settings > Privacy & Security');
   }
   
   createWindow();
@@ -236,6 +329,16 @@ app.whenReady().then(async () => {
     console.log('System resumed - resuming tracking');
     isIdle = false;
     lastActiveTime = Date.now();
+  });
+  
+  // Theme change listener
+  nativeTheme.on('updated', () => {
+    if (mainWindow) {
+      const theme = nativeTheme.shouldUseDarkColors ? 'dark' : 'light';
+      mainWindow.webContents.executeJavaScript(`
+        document.documentElement.setAttribute('data-theme', '${theme}');
+      `);
+    }
   });
   
   app.on('activate', () => {

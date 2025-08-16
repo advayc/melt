@@ -1,15 +1,20 @@
 import React, { useEffect, useState } from 'react';
-import dayjs from 'dayjs';
 import Duration from './components/Duration';
 import UsageRow from './components/UsageRow';
+import ThemeToggle from './components/ThemeToggle';
 import './theme.css';
-import useIdle from './components/IdleDetector.jsx';
+import { AppUsage, SystemInfo } from './types';
 
-export default function App() {
-  const [usage, setUsage] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [systemInfo, setSystemInfo] = useState({});
-  const idle = useIdle(120000); // 2 min idle threshold
+export default function App(): JSX.Element {
+  const [usage, setUsage] = useState<AppUsage[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [systemInfo, setSystemInfo] = useState<SystemInfo>({
+    isIdle: false,
+    idleTime: 0,
+    uptime: 0,
+    platform: 'darwin',
+    trackingStarted: Date.now()
+  });
 
   useEffect(() => {
     Promise.all([
@@ -21,7 +26,7 @@ export default function App() {
       setLoading(false);
     });
     
-    window.screenTimeAPI.onUsageUpdate(data => setUsage(data));
+    window.screenTimeAPI.onUsageUpdate((data: AppUsage[]) => setUsage(data));
     
     // Update system info periodically
     const sysInfoInterval = setInterval(() => {
@@ -31,13 +36,13 @@ export default function App() {
     return () => clearInterval(sysInfoInterval);
   }, []);
 
-  function exportData() {
-    window.screenTimeAPI.exportData().then(file => 
+  function exportData(): void {
+    window.screenTimeAPI.exportData().then((file: string) => 
       alert(`Exported to ${file.split('/').pop()}`)
     );
   }
   
-  function clearData() {
+  function clearData(): void {
     if (confirm('Clear all tracking data? This cannot be undone.')) {
       window.screenTimeAPI.clearData().then(() => {
         setUsage([]);
@@ -45,14 +50,15 @@ export default function App() {
     }
   }
 
-  const totalTime = usage.reduce((sum, app) => sum + app.totalMs, 0);
-  const activeApps = usage.filter(app => app.isActive).length;
+  const totalTime: number = usage.reduce((sum, app) => sum + app.totalMs, 0);
+  const activeApps: number = usage.filter(app => app.isActive).length;
 
   return (
     <div className="app-shell">
       <header className="app-header">
         <h1>Screen Time</h1>
         <div className="header-actions">
+          <ThemeToggle />
           <button onClick={exportData}>Export JSON</button>
           <button onClick={clearData} className="btn-secondary">Clear Data</button>
         </div>
